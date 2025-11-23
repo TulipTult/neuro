@@ -14,6 +14,8 @@ import { autoUpdater } from 'electron-updater';
 import log from 'electron-log';
 import MenuBuilder from './menu';
 import { resolveHtmlPath } from './util';
+import { analyzeComponents } from './gemini';
+import fs from 'fs';
 
 class AppUpdater {
   constructor() {
@@ -29,6 +31,82 @@ ipcMain.on('ipc-example', async (event, arg) => {
   const msgTemplate = (pingPong: string) => `IPC test: ${pingPong}`;
   console.log(msgTemplate(arg));
   event.reply('ipc-example', msgTemplate('pong'));
+});
+
+ipcMain.on('scan-image', async (event, dataUrl: string) => {
+  const result = await analyzeComponents(dataUrl);
+  event.reply('scan-image-result', result);
+});
+
+ipcMain.handle('list-assets', async () => {
+  try {
+    const assetsPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'assets')
+      : path.join(__dirname, '../../assets');
+    const files = await fs.promises.readdir(assetsPath);
+    return files
+      .filter((f) => /\.(png|jpg|jpeg|gif|svg)$/i.test(f))
+      .map((f) => f.replace(/\.(png|jpg|jpeg|gif|svg)$/i, '').toLowerCase());
+  } catch {
+    return [];
+  }
+});
+
+ipcMain.handle('chat-send', async (_event, payload: {
+  messages: { role: string; content: string }[];
+  model: string;
+  temperature: number;
+}) => {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  const { messages, model, temperature } = payload;
+  if (!apiKey) {
+    return { text: 'Missing GEMINI_API_KEY. Set env var.', error: true };
+  }
+  try {
+    const limitWords = (str: string, max: number) => {
+      const words = str.trim().split(/\s+/);
+      if (words.length <= max) return str;
+      return words.slice(0, max).join(' ') + ' [trimmed]';
+    };
+    const doRequest = async (useModel: string) => {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(useModel)}:generateContent?key=${apiKey}`;
+      const contents = messages.map(m => ({
+        role: m.role === 'user' ? 'user' : 'model',
+        parts: [{ text: m.content }],
+      }));
+      const body = { contents, generationConfig: { temperature } };
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { res, json: await res.json(), useModel };
+    };
+
+    const first = await doRequest(model);
+    if (first.res.status === 404 && model !== 'gemini-2.5-pro') {
+      const second = await doRequest('gemini-2.5-pro');
+      const textRaw = second.json?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '(no response)';
+      const text = limitWords(textRaw, 120);
+      return {
+        text,
+        fallback: true,
+        usedModel: 'gemini-2.5-pro',
+        error: first.res.status === 404 ? true : undefined,
+        note: 'Model not found; fell back to gemini-2.5-pro',
+      };
+    }
+    if (!first.res.ok) {
+      return { text: `HTTP ${first.res.status}`, error: true };
+    }
+    const textRaw =
+      first.json?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') ||
+      '(no response)';
+    const text = limitWords(textRaw, 120);
+    return { text, usedModel: model };
+  } catch (e: any) {
+    return { text: e.message || 'Request failed', error: true };
+  }
 });
 
 if (process.env.NODE_ENV === 'production') {

@@ -9,7 +9,7 @@ export const NavBar: React.FC = () => {
         <img src={"/assets/logo.png"} alt="logo" />
       </div>
       <ul className="nav-items">
-        {['View Chat', 'View Previous Chats'].map((item) => (
+        {['+', '-'].map((item) => (
           <li key={item} className="nav-item" title={item}>
             <span>{item.charAt(0)}</span>
           </li>
